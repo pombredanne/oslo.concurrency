@@ -21,6 +21,7 @@ import multiprocessing
 import os
 import pickle
 import resource
+import socket
 import stat
 import subprocess
 import sys
@@ -32,7 +33,6 @@ from oslotest import base as test_base
 import six
 
 from oslo_concurrency import processutils
-from oslotest import mockpatch
 
 
 PROCESS_EXECUTION_ERROR_LOGGING_TEST = """#!/bin/bash
@@ -124,23 +124,23 @@ class ProcessExecutionErrorTest(test_base.BaseTestCase):
 
     def test_defaults(self):
         err = processutils.ProcessExecutionError()
-        self.assertTrue('None\n' in six.text_type(err))
-        self.assertTrue('code: -\n' in six.text_type(err))
+        self.assertIn('None\n', six.text_type(err))
+        self.assertIn('code: -\n', six.text_type(err))
 
     def test_with_description(self):
         description = 'The Narwhal Bacons at Midnight'
         err = processutils.ProcessExecutionError(description=description)
-        self.assertTrue(description in six.text_type(err))
+        self.assertIn(description, six.text_type(err))
 
     def test_with_exit_code(self):
         exit_code = 0
         err = processutils.ProcessExecutionError(exit_code=exit_code)
-        self.assertTrue(str(exit_code) in six.text_type(err))
+        self.assertIn(str(exit_code), six.text_type(err))
 
     def test_with_cmd(self):
         cmd = 'telinit'
         err = processutils.ProcessExecutionError(cmd=cmd)
-        self.assertTrue(cmd in six.text_type(err))
+        self.assertIn(cmd, six.text_type(err))
 
     def test_with_stdout(self):
         stdout = """
@@ -164,12 +164,12 @@ class ProcessExecutionErrorTest(test_base.BaseTestCase):
         """.strip()
         err = processutils.ProcessExecutionError(stdout=stdout)
         print(six.text_type(err))
-        self.assertTrue('people-kings' in six.text_type(err))
+        self.assertIn('people-kings', six.text_type(err))
 
     def test_with_stderr(self):
         stderr = 'Cottonian library'
         err = processutils.ProcessExecutionError(stderr=stderr)
-        self.assertTrue(stderr in six.text_type(err))
+        self.assertIn(stderr, six.text_type(err))
 
     def test_retry_on_failure(self):
         fd, tmpfilename = tempfile.mkstemp()
@@ -206,11 +206,12 @@ exit 1
             fp = open(tmpfilename2, 'r')
             runs = fp.read()
             fp.close()
-            self.assertNotEqual(runs.strip(), 'failure', 'stdin did not '
-                                                         'always get passed '
-                                                         'correctly')
+            self.assertNotEqual('failure', 'stdin did not '
+                                           'always get passed '
+                                           'correctly',
+                                runs.strip())
             runs = int(runs.strip())
-            self.assertEqual(runs, 10, 'Ran %d times instead of 10.' % (runs,))
+            self.assertEqual(10, runs, 'Ran %d times instead of 10.' % (runs,))
         finally:
             os.unlink(tmpfilename)
             os.unlink(tmpfilename2)
@@ -233,6 +234,14 @@ exit 1
                                         'sh', '-c', 'pwd',
                                         cwd=tmpdir)
         self.assertIn(tmpdir, out)
+
+    def test_process_input_with_string(self):
+        code = ';'.join(('import sys',
+                         'print(len(sys.stdin.readlines()))'))
+        args = [sys.executable, '-c', code]
+        input = "\n".join(['foo', 'bar', 'baz'])
+        stdout, stderr = processutils.execute(*args, process_input=input)
+        self.assertEqual("3", stdout.rstrip())
 
     def test_check_exit_code_list(self):
         processutils.execute('/usr/bin/env', 'sh', '-c', 'exit 101',
@@ -274,7 +283,7 @@ grep foo
     # This test and the one below ensures that when communicate raises
     # an OSError, we do the right thing(s)
     def test_exception_on_communicate_error(self):
-        mock = self.useFixture(mockpatch.Patch(
+        mock = self.useFixture(fixtures.MockPatch(
             'subprocess.Popen.communicate',
             side_effect=OSError(errno.EAGAIN, 'fake-test')))
 
@@ -287,7 +296,7 @@ grep foo
         self.assertEqual(1, mock.mock.call_count)
 
     def test_retry_on_communicate_error(self):
-        mock = self.useFixture(mockpatch.Patch(
+        mock = self.useFixture(fixtures.MockPatch(
             'subprocess.Popen.communicate',
             side_effect=OSError(errno.EAGAIN, 'fake-test')))
 
@@ -302,7 +311,7 @@ grep foo
 
     def _test_and_check_logging_communicate_errors(self, log_errors=None,
                                                    attempts=None):
-        mock = self.useFixture(mockpatch.Patch(
+        mock = self.useFixture(fixtures.MockPatch(
             'subprocess.Popen.communicate',
             side_effect=OSError(errno.EAGAIN, 'fake-test')))
 
@@ -397,9 +406,10 @@ grep foo
         self.assertIsInstance(err.stderr, six.text_type)
         self.assertIn('onstdout --password="***"', err.stdout)
         self.assertIn('onstderr --password="***"', err.stderr)
-        self.assertEqual(err.cmd, ' '.join([tmpfilename,
-                                            'password="***"',
-                                            'something']))
+        self.assertEqual(' '.join([tmpfilename,
+                                   'password="***"',
+                                   'something']),
+                         err.cmd)
         self.assertNotIn('secret', str(err))
 
     def execute_undecodable_bytes(self, out_bytes, err_bytes,
@@ -427,8 +437,8 @@ grep foo
         out, err = self.execute_undecodable_bytes(out_bytes, err_bytes,
                                                   binary=binary)
         if six.PY3 and not binary:
-            self.assertEqual(out, os.fsdecode(out_bytes))
-            self.assertEqual(err, os.fsdecode(err_bytes))
+            self.assertEqual(os.fsdecode(out_bytes), out)
+            self.assertEqual(os.fsdecode(err_bytes), err)
         else:
             self.assertEqual(out, out_bytes)
             self.assertEqual(err, err_bytes)
@@ -454,13 +464,13 @@ grep foo
         if six.PY3:
             # On Python 3, stdout and stderr attributes of
             # ProcessExecutionError must always be Unicode
-            self.assertEqual(out, os.fsdecode(out_bytes))
-            self.assertEqual(err, os.fsdecode(err_bytes))
+            self.assertEqual(os.fsdecode(out_bytes), out)
+            self.assertEqual(os.fsdecode(err_bytes), err)
         else:
             # On Python 2, stdout and stderr attributes of
             # ProcessExecutionError must always be bytes
-            self.assertEqual(out, out_bytes)
-            self.assertEqual(err, err_bytes)
+            self.assertEqual(out_bytes, out)
+            self.assertEqual(err_bytes, err)
 
     def test_undecodable_bytes_error(self):
         self.check_undecodable_bytes_error(False)
@@ -481,7 +491,7 @@ grep foo
         self.assertEqual(42, exc.exit_code)
         self.assertEqual('my cmd', exc.cmd)
         self.assertEqual('my description', exc.description)
-        self.assertEqual(exc_message, str(exc))
+        self.assertEqual(str(exc), exc_message)
 
 
 class ProcessExecutionErrorLoggingTest(test_base.BaseTestCase):
@@ -599,7 +609,9 @@ class FakeSshConnection(object):
         self.out = out
         self.err = err
 
-    def exec_command(self, cmd):
+    def exec_command(self, cmd, timeout=None):
+        if timeout:
+            raise socket.timeout()
         stdout = FakeSshStream(self.out)
         stdout.setup_channel(self.rc)
         return (six.BytesIO(),
@@ -617,6 +629,12 @@ class SshExecuteTestCase(test_base.BaseTestCase):
         self.assertRaises(processutils.InvalidArgumentError,
                           processutils.ssh_execute,
                           None, 'ls', process_input='important')
+
+    def test_timeout_error(self):
+        self.assertRaises(socket.timeout,
+                          processutils.ssh_execute,
+                          FakeSshConnection(0), 'ls',
+                          timeout=10)
 
     def test_works(self):
         out, err = processutils.ssh_execute(FakeSshConnection(0), 'ls')
@@ -640,11 +658,11 @@ class SshExecuteTestCase(test_base.BaseTestCase):
 
         out, err = processutils.ssh_execute(conn, 'ls', binary=binary)
         if six.PY3 and not binary:
-            self.assertEqual(out, os.fsdecode(out_bytes))
-            self.assertEqual(err, os.fsdecode(err_bytes))
+            self.assertEqual(os.fsdecode(out_bytes), out)
+            self.assertEqual(os.fsdecode(err_bytes), err)
         else:
-            self.assertEqual(out, out_bytes)
-            self.assertEqual(err, err_bytes)
+            self.assertEqual(out_bytes, out)
+            self.assertEqual(err_bytes, err)
 
     def test_undecodable_bytes(self):
         self.check_undecodable_bytes(False)
@@ -670,13 +688,13 @@ class SshExecuteTestCase(test_base.BaseTestCase):
         if six.PY3:
             # On Python 3, stdout and stderr attributes of
             # ProcessExecutionError must always be Unicode
-            self.assertEqual(out, os.fsdecode(out_bytes))
-            self.assertEqual(err, os.fsdecode(err_bytes))
+            self.assertEqual(os.fsdecode(out_bytes), out)
+            self.assertEqual(os.fsdecode(err_bytes), err)
         else:
             # On Python 2, stdout and stderr attributes of
             # ProcessExecutionError must always be bytes
-            self.assertEqual(out, out_bytes)
-            self.assertEqual(err, err_bytes)
+            self.assertEqual(out_bytes, out)
+            self.assertEqual(err_bytes, err)
 
     def test_undecodable_bytes_error(self):
         self.check_undecodable_bytes_error(False)
@@ -711,9 +729,9 @@ class SshExecuteTestCase(test_base.BaseTestCase):
                                     check_exit_code=check)
 
             self.assertEqual(rc, err.exit_code)
-            self.assertEqual(err.stdout, 'password="***"')
-            self.assertEqual(err.stderr, 'password="***"')
-            self.assertEqual(err.cmd, 'ls --password="***"')
+            self.assertEqual('password="***"', err.stdout)
+            self.assertEqual('password="***"', err.stderr)
+            self.assertEqual('ls --password="***"', err.cmd)
             self.assertNotIn('secret', str(err))
             self.assertNotIn('foobar', str(err))
         else:
@@ -752,7 +770,7 @@ class PrlimitTestCase(test_base.BaseTestCase):
         # Create a new soft limit for a resource, lower than the current
         # soft limit.
         soft_limit, hard_limit = resource.getrlimit(res)
-        if soft_limit < 0:
+        if soft_limit <= 0:
             soft_limit = default_limit
         else:
             soft_limit -= substract
@@ -775,7 +793,7 @@ class PrlimitTestCase(test_base.BaseTestCase):
         prlimit = self.limit_address_space()
         stdout, stderr = processutils.execute(*self.SIMPLE_PROGRAM,
                                               prlimit=prlimit)
-        self.assertEqual(stdout.rstrip(), '')
+        self.assertEqual('', stdout.rstrip())
         self.assertEqual(stderr.rstrip(), '')
 
     def check_limit(self, prlimit, resource, value):
@@ -784,11 +802,36 @@ class PrlimitTestCase(test_base.BaseTestCase):
         args = [sys.executable, '-c', code]
         stdout, stderr = processutils.execute(*args, prlimit=prlimit)
         expected = (value, value)
-        self.assertEqual(stdout.rstrip(), str(expected))
+        self.assertEqual(str(expected), stdout.rstrip())
 
     def test_address_space(self):
         prlimit = self.limit_address_space()
         self.check_limit(prlimit, 'RLIMIT_AS', prlimit.address_space)
+
+    def test_core_size(self):
+        size = self.soft_limit(resource.RLIMIT_CORE, 1, 1024)
+        prlimit = processutils.ProcessLimits(core_file_size=size)
+        self.check_limit(prlimit, 'RLIMIT_CORE', prlimit.core_file_size)
+
+    def test_cpu_time(self):
+        time = self.soft_limit(resource.RLIMIT_CPU, 1, 1024)
+        prlimit = processutils.ProcessLimits(cpu_time=time)
+        self.check_limit(prlimit, 'RLIMIT_CPU', prlimit.cpu_time)
+
+    def test_data_size(self):
+        max_memory = self.memory_limit(resource.RLIMIT_DATA)
+        prlimit = processutils.ProcessLimits(data_size=max_memory)
+        self.check_limit(prlimit, 'RLIMIT_DATA', max_memory)
+
+    def test_file_size(self):
+        size = self.soft_limit(resource.RLIMIT_FSIZE, 1, 1024)
+        prlimit = processutils.ProcessLimits(file_size=size)
+        self.check_limit(prlimit, 'RLIMIT_FSIZE', prlimit.file_size)
+
+    def test_memory_locked(self):
+        max_memory = self.memory_limit(resource.RLIMIT_MEMLOCK)
+        prlimit = processutils.ProcessLimits(memory_locked=max_memory)
+        self.check_limit(prlimit, 'RLIMIT_MEMLOCK', max_memory)
 
     def test_resident_set_size(self):
         max_memory = self.memory_limit(resource.RLIMIT_RSS)
@@ -799,6 +842,16 @@ class PrlimitTestCase(test_base.BaseTestCase):
         nfiles = self.soft_limit(resource.RLIMIT_NOFILE, 1, 1024)
         prlimit = processutils.ProcessLimits(number_files=nfiles)
         self.check_limit(prlimit, 'RLIMIT_NOFILE', nfiles)
+
+    def test_number_processes(self):
+        nprocs = self.soft_limit(resource.RLIMIT_NPROC, 1, 65535)
+        prlimit = processutils.ProcessLimits(number_processes=nprocs)
+        self.check_limit(prlimit, 'RLIMIT_NPROC', nprocs)
+
+    def test_stack_size(self):
+        max_memory = self.memory_limit(resource.RLIMIT_STACK)
+        prlimit = processutils.ProcessLimits(stack_size=max_memory)
+        self.check_limit(prlimit, 'RLIMIT_STACK', max_memory)
 
     def test_unsupported_prlimit(self):
         self.assertRaises(ValueError, processutils.ProcessLimits, xxx=33)
@@ -818,8 +871,8 @@ class PrlimitTestCase(test_base.BaseTestCase):
         try:
             processutils.execute(*args, prlimit=prlimit)
         except processutils.ProcessExecutionError as exc:
-            self.assertEqual(exc.exit_code, 1)
-            self.assertEqual(exc.stdout, '')
+            self.assertEqual(1, exc.exit_code)
+            self.assertEqual('', exc.stdout)
             expected = ('%s -m oslo_concurrency.prlimit: '
                         'failed to execute /missing_path/dont_exist/program: '
                         % os.path.basename(sys.executable))
@@ -841,11 +894,33 @@ class PrlimitTestCase(test_base.BaseTestCase):
         try:
             processutils.execute(*args, prlimit=prlimit)
         except processutils.ProcessExecutionError as exc:
-            self.assertEqual(exc.exit_code, 1)
-            self.assertEqual(exc.stdout, '')
+            self.assertEqual(1, exc.exit_code)
+            self.assertEqual('', exc.stdout)
             expected = ('%s -m oslo_concurrency.prlimit: '
                         'failed to set the AS resource limit: '
                         % os.path.basename(sys.executable))
             self.assertIn(expected, exc.stderr)
         else:
             self.fail("ProcessExecutionError not raised")
+
+    @mock.patch.object(os, 'name', 'nt')
+    @mock.patch.object(processutils.subprocess, "Popen")
+    def test_prlimit_windows(self, mock_popen):
+        # We want to ensure that process resource limits are
+        # ignored on Windows, in which case this feature is not
+        # supported. We'll just check the command passed to Popen,
+        # which is expected to be unaltered.
+        prlimit = self.limit_address_space()
+        mock_popen.return_value.communicate.return_value = None
+
+        processutils.execute(
+            *self.SIMPLE_PROGRAM,
+            prlimit=prlimit,
+            check_exit_code=False)
+
+        mock_popen.assert_called_once_with(
+            self.SIMPLE_PROGRAM,
+            stdin=mock.ANY, stdout=mock.ANY,
+            stderr=mock.ANY, close_fds=mock.ANY,
+            preexec_fn=mock.ANY, shell=mock.ANY,
+            cwd=mock.ANY, env=mock.ANY)

@@ -28,6 +28,7 @@ import sys
 import time
 
 import enum
+from oslo_utils import encodeutils
 from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
@@ -134,16 +135,36 @@ class ProcessLimits(object):
     Attributes:
 
     * address_space: Address space limit in bytes
-    * number_files: Maximum number of open files.
+    * core_file_size: Core file size limit in bytes
+    * cpu_time: CPU time limit in seconds
+    * data_size: Data size limit in bytes
+    * file_size: File size limit in bytes
+    * memory_locked: Locked memory limit in bytes
+    * number_files: Maximum number of open files
+    * number_processes: Maximum number of processes
     * resident_set_size: Maximum Resident Set Size (RSS) in bytes
+    * stack_size: Stack size limit in bytes
 
     This object can be used for the *prlimit* parameter of :func:`execute`.
     """
 
+    _LIMITS = {
+        "address_space": "--as",
+        "core_file_size": "--core",
+        "cpu_time": "--cpu",
+        "data_size": "--data",
+        "file_size": "--fsize",
+        "memory_locked": "--memlock",
+        "number_files": "--nofile",
+        "number_processes": "--nproc",
+        "resident_set_size": "--rss",
+        "stack_size": "--stack",
+    }
+
     def __init__(self, **kw):
-        self.address_space = kw.pop('address_space', None)
-        self.number_files = kw.pop('number_files', None)
-        self.resident_set_size = kw.pop('resident_set_size', None)
+        for limit in self._LIMITS.keys():
+            setattr(self, limit, kw.pop(limit, None))
+
         if kw:
             raise ValueError("invalid limits: %s"
                              % ', '.join(sorted(kw.keys())))
@@ -151,12 +172,10 @@ class ProcessLimits(object):
     def prlimit_args(self):
         """Create a list of arguments for the prlimit command line."""
         args = []
-        if self.address_space:
-            args.append('--as=%s' % self.address_space)
-        if self.number_files:
-            args.append('--nofile=%s' % self.number_files)
-        if self.resident_set_size:
-            args.append('--rss=%s' % self.resident_set_size)
+        for limit in self._LIMITS.keys():
+            val = getattr(self, limit)
+            if val is not None:
+                args.append("%s=%s" % (self._LIMITS[limit], val))
         return args
 
 
@@ -170,7 +189,7 @@ def execute(*cmd, **kwargs):
     :param cwd:             Set the current working directory
     :type cwd:              string
     :param process_input:   Send to opened process.
-    :type process_input:    string
+    :type process_input:    string or bytes
     :param env_variables:   Environment variables and their values that
                             will be set for the process.
     :type env_variables:    dict
@@ -241,6 +260,9 @@ def execute(*cmd, **kwargs):
     process.  If this parameter is used, the child process will be spawned by a
     wrapper process which will set limits before spawning the command.
 
+    .. versionchanged:: 3.17
+       *process_input* can now be either bytes or string on python3.
+
     .. versionchanged:: 3.4
        Added *prlimit* optional parameter.
 
@@ -248,7 +270,7 @@ def execute(*cmd, **kwargs):
        Added *cwd* optional parameter.
 
     .. versionchanged:: 1.9
-       Added *binary* optional parameter. On Python 3, *stdout* and *stdout*
+       Added *binary* optional parameter. On Python 3, *stdout* and *stderr*
        are now returned as Unicode strings by default, or bytes if *binary* is
        true.
 
@@ -261,6 +283,8 @@ def execute(*cmd, **kwargs):
 
     cwd = kwargs.pop('cwd', None)
     process_input = kwargs.pop('process_input', None)
+    if process_input is not None:
+        process_input = encodeutils.to_utf8(process_input)
     env_variables = kwargs.pop('env_variables', None)
     check_exit_code = kwargs.pop('check_exit_code', [0])
     ignore_exit_code = False
@@ -309,11 +333,16 @@ def execute(*cmd, **kwargs):
     cmd = [str(c) for c in cmd]
 
     if prlimit:
-        args = [sys.executable, '-m', 'oslo_concurrency.prlimit']
-        args.extend(prlimit.prlimit_args())
-        args.append('--')
-        args.extend(cmd)
-        cmd = args
+        if os.name == 'nt':
+            LOG.log(loglevel,
+                    _('Process resource limits are ignored as '
+                      'this feature is not supported on Windows.'))
+        else:
+            args = [sys.executable, '-m', 'oslo_concurrency.prlimit']
+            args.extend(prlimit.prlimit_args())
+            args.append('--')
+            args.extend(cmd)
+            cmd = args
 
     sanitized_cmd = strutils.mask_password(' '.join(cmd))
 
@@ -448,7 +477,7 @@ def trycmd(*args, **kwargs):
 
 def ssh_execute(ssh, cmd, process_input=None,
                 addl_env=None, check_exit_code=True,
-                binary=False):
+                binary=False, timeout=None):
     """Run a command through SSH.
 
     .. versionchanged:: 1.9
@@ -463,7 +492,8 @@ def ssh_execute(ssh, cmd, process_input=None,
         # This is (probably) fixable if we need it...
         raise InvalidArgumentError(_('process_input not supported over SSH'))
 
-    stdin_stream, stdout_stream, stderr_stream = ssh.exec_command(cmd)
+    stdin_stream, stdout_stream, stderr_stream = ssh.exec_command(
+        cmd, timeout=timeout)
     channel = stdout_stream.channel
 
     # NOTE(justinsb): This seems suspicious...
